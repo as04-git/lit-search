@@ -499,3 +499,51 @@ class TestStepAccounting:
             "arxiv",
             "dblp",
         ]
+
+
+class TestOpenSnowball:
+    def test_open_routes_carry_a_snowball_when_semantic_scholar_refuses(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from lit_search.runners.explore_runner import ExploreOutcome
+
+        with patch.dict("os.environ", {"LIT_SEARCH_HOME": str(tmp_path)}):
+            assert main(["hunt", "start", "q", "--profile", "prior-art", "--json"]) == 0
+            hunt_id = json.loads(capsys.readouterr().out)["hunt"]
+            session = HuntSession.load(hunt_id, root=tmp_path / "hunts")
+            _absorb(
+                session, "a", _paper("The seed paper of this hunt", "10.48550/arxiv.2501.00001")
+            )
+
+            citer = _paper("A later paper citing the seed", "10.1/c")
+            opened = ExploreOutcome(
+                papers=[citer],
+                steps=[
+                    SourceCoverage.partial(
+                        "snowball:forward:openalex-fulltext:The seed paper of this hunt",
+                        1,
+                        detail="x",
+                    ),
+                    SourceCoverage.complete(
+                        "snowball:backward:arxiv-source:The seed paper of this hunt",
+                        0,
+                        reported_total=0,
+                    ),
+                ],
+                routes={id(citer): ["cites c1 [fulltext]"]},
+            )
+            refused = ExploreOutcome(
+                steps=[SourceCoverage.failed("snowball:seeds", error="429", error_type="HTTPError")]
+            )
+            with (
+                patch("lit_search.cli.hunt.run_open_snowball", return_value=opened),
+                patch("lit_search.cli.hunt.run_snowball", return_value=(refused, [])),
+                patch("lit_search.cli.hunt.s2_connector"),
+            ):
+                assert main(["hunt", "snowball", hunt_id, "c1"]) == 0
+        out = capsys.readouterr().out
+        assert "+1 new" in out
+        assert "FAIL snowball:seeds" in out
+        session = HuntSession.load(hunt_id, root=tmp_path / "hunts")
+        assert session.candidates["c2"].routes[0]["label"] == "snowball: cites c1 [fulltext]"
+        assert sorted(session.data["crawled"]["c1"]) == ["backward", "forward"]

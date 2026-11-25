@@ -16,6 +16,8 @@ Typical loop (see ``docs/hunt-playbook.md``)::
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import contextlib
 import datetime as dt
 import re
 import textwrap
@@ -49,7 +51,9 @@ from lit_search.hunt.session import (
     hunts_root,
 )
 from lit_search.runners.explore_runner import (
+    ExploreOutcome,
     _hydrate,
+    _words,
     run_related,
     run_snippets,
     run_snowball,
@@ -63,13 +67,23 @@ from lit_search.runners.find_runner import (
     build_find_connectors,
     run_find,
 )
+from lit_search.runners.open_graph import (
+    OpenSeed,
+    complete_seed,
+    lookup_papers,
+    resolve_seed,
+    run_open_related,
+    run_open_snowball,
+    seed_from_paper,
+)
 from lit_search.store.operations import from_search_result
+from lit_search.utils import latex_bib
 from lit_search.utils.rate_limit import request_deadline
 from lit_search.utils.relevance import relevance_scores
 
 #: Wall-clock seconds a Semantic Scholar move may spend, waiting for request slots included.
 #: Past it, a step reports itself busy (nothing is sent) instead of stalling the hunt.
-MOVE_DEADLINES = {"related": 60.0, "snippets": 45.0, "snowball": 150.0}
+MOVE_DEADLINES = {"related": 60.0, "snippets": 45.0, "snowball": 150.0, "add": 30.0}
 
 #: Databases a hunt's Boolean ``search`` move queries unless told otherwise: broad,
 #: keyless, and answering Boolean queries natively.  Only those that can express the
@@ -203,6 +217,13 @@ def add_hunt_parser(subparsers: argparse._SubParsersAction, parents: list) -> No
     related.add_argument(
         "--neighbours", type=positive_int, default=None, help="default 40; 120 when --wide"
     )
+    related.add_argument(
+        "--via",
+        choices=("both", "s2", "open"),
+        default="both",
+        help="Semantic Scholar recommendations and citation hop, OpenAlex (title search over "
+        "two years and the last 90 days, plus related_works), or both (default)",
+    )
 
     snowball = move_parser(
         "snowball",
@@ -225,6 +246,13 @@ def add_hunt_parser(subparsers: argparse._SubParsersAction, parents: list) -> No
     )
     snowball.add_argument(
         "--edges", type=positive_int, default=2000, help="edges read per seed and direction"
+    )
+    snowball.add_argument(
+        "--via",
+        choices=("both", "s2", "open"),
+        default="both",
+        help="Semantic Scholar's citation graph, the open routes (references from the arXiv "
+        "source, citers from OpenAlex full text), or both (default)",
     )
 
     add = move_parser(
@@ -483,9 +511,9 @@ def _emit_move(
 
 _REPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "find": ("text", "k", "since", "until", "databases"),
-    "related": ("seeds", "negative", "recs", "no_refs", "no_cites", "neighbours"),
+    "related": ("seeds", "negative", "recs", "no_refs", "no_cites", "neighbours", "via"),
     "snippets": ("text", "k", "field"),
-    "snowball": ("seeds", "forward", "backward", "since", "until", "max", "edges"),
+    "snowball": ("seeds", "forward", "backward", "since", "until", "max", "edges", "via"),
     "add": ("refs", "handles"),
     "search": ("query", "databases", "max", "since", "until"),
 }
@@ -641,60 +669,166 @@ def _seed_ids(session: HuntSession, refs: list[str]) -> list[str]:
 def _related(session: HuntSession, args: argparse.Namespace) -> int:
     args.recs = _width(session, args.recs, 20, 50)
     args.neighbours = _width(session, args.neighbours, 40, 120)
-    seeds = _seed_ids(session, args.seeds)
-    negative = _seed_ids(session, args.negative)
+    via = getattr(args, "via", None) or "both"
     key = (
-        f"related|{','.join(sorted(seeds))}|not:{','.join(sorted(negative))}|{args.recs}|"
-        f"{args.no_refs}|{args.no_cites}|{args.neighbours}"
+        f"related|{','.join(sorted(args.seeds))}|not:{','.join(sorted(args.negative))}|"
+        f"{args.recs}|{args.no_refs}|{args.no_cites}|{args.neighbours}|{via}"
     )
     key += _retry_suffix(args)
     if (code := _guard(session, key, args)) is not None:
         return code
     started = time.time()
-    connector = s2_connector()
-    with request_deadline(started + MOVE_DEADLINES["related"]):
-        outcome = run_related(
-            connector,
-            seeds,
-            negative=negative,
-            recommendations=max(0, args.recs),
-            references=not args.no_refs,
-            citations=not args.no_cites,
-            max_neighbours=args.neighbours,
+    pool = None
+    open_future = None
+    if via in ("both", "open"):
+        negative_titles = [
+            session.resolve(r).paper.title or ""
+            for r in args.negative
+            if r.startswith("c") and r[1:].isdigit()
+        ]
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        open_future = pool.submit(
+            run_open_related,
+            _open_seeds(session, args.seeds),
+            negative=negative_titles,
+            count=max(5, args.recs),
+            seconds=MOVE_DEADLINES["related"] - 10,
         )
+    steps: list[SourceCoverage] = []
     papers: list[tuple[Paper, str, float, list[str]]] = []
-    for paper in outcome.papers:
-        routes = outcome.routes.get(id(paper), [])
-        weight = 0.0
-        for route in routes:
-            if route.startswith("rec#"):
-                weight += _rank_weight(int(route[4:]), 0.7)
-            else:
-                weight += 0.5 * int(
-                    route.split()[-2] if route.startswith("cited by") else route.split()[1]
+    seeds = (
+        (_seed_ids(session, args.seeds) if via == "s2" else _s2_seeds(session, args.seeds))
+        if via != "open"
+        else []
+    )
+    if seeds:
+        negative = [i for _, i in _s2_pairs(session, args.negative) if i]
+        with request_deadline(started + MOVE_DEADLINES["related"]):
+            outcome = run_related(
+                s2_connector(),
+                seeds,
+                negative=negative,
+                recommendations=max(0, args.recs),
+                references=not args.no_refs,
+                citations=not args.no_cites,
+                max_neighbours=args.neighbours,
+            )
+        steps += outcome.steps
+        for paper in outcome.papers:
+            routes = outcome.routes.get(id(paper), [])
+            weight = 0.0
+            for route in routes:
+                if route.startswith("rec#"):
+                    weight += _rank_weight(int(route[4:]), 0.7)
+                else:
+                    weight += 0.5 * int(
+                        route.split()[-2] if route.startswith("cited by") else route.split()[1]
+                    )
+            papers.append((paper, "related: " + ", ".join(routes), weight, []))
+    if open_future is not None and pool is not None:
+        try:
+            opened = open_future.result()
+        except Exception as exc:
+            steps.append(
+                SourceCoverage.failed("related:open", error=str(exc), error_type=type(exc).__name__)
+            )
+        else:
+            steps += opened.steps
+            for paper in opened.papers:
+                routes = opened.routes.get(id(paper), [])
+                weight = sum(
+                    _rank_weight(int(r.split("#")[1].split()[0]), 0.5) if "#" in r else 0.5
+                    for r in routes
                 )
-        papers.append((paper, "related: " + ", ".join(routes), weight, []))
+                papers.append((paper, "related: " + ", ".join(routes), weight, []))
+        finally:
+            pool.shutdown(wait=False)
     record = session.absorb(
         kind="related",
         replay=_replay(args, "related"),
         key=key,
-        args={"seeds": " ".join(args.seeds), "not": " ".join(args.negative) or None},
+        args={
+            "seeds": " ".join(args.seeds),
+            "not": " ".join(args.negative) or None,
+            "via": via if via != "both" else None,
+        },
         started=started,
-        steps=outcome.steps,
+        steps=steps,
         papers=papers,
     )
-    return _emit_move(session, record, outcome.steps, args)
+    return _emit_move(session, record, steps, args)
+
+
+def _open_seeds(session: HuntSession, refs: list[str]) -> list[OpenSeed]:
+    from lit_search.connectors.openalex import OpenAlexConnector
+
+    seeds: list[OpenSeed] = []
+    openalex: OpenAlexConnector | None = None
+    for ref in refs:
+        if ref.startswith("c") and ref[1:].isdigit():
+            seed = seed_from_paper(ref, session.resolve(ref).paper)
+            if not seed.arxiv:
+                openalex = openalex or OpenAlexConnector(
+                    api_key=credentials.get("OPENALEX_API_KEY")
+                )
+                with contextlib.suppress(Exception):
+                    seed = complete_seed(openalex, seed)
+            seeds.append(seed)
+            continue
+        openalex = openalex or OpenAlexConnector(api_key=credentials.get("OPENALEX_API_KEY"))
+        try:
+            found = resolve_seed(openalex, ref)
+        except Exception:
+            found = None
+        seeds.append(found or OpenSeed(ref, ref, latex_bib.arxiv_id_in(ref), None, None))
+    return seeds
+
+
+def _rank_open(
+    outcome: ExploreOutcome, focus: str, keep: int
+) -> tuple[list[tuple[Paper, str, float, list[str]]], SourceCoverage | None]:
+    focus_words = _words(focus)
+
+    def rank_key(paper: Paper) -> tuple[float, ...]:
+        routes = outcome.routes.get(id(paper), [])
+        text = " ".join([paper.title or "", *outcome.evidence.get(id(paper), [])])
+        date = paper.publication_date.toordinal() if paper.publication_date else 0
+        return (-len(routes), -len(focus_words & _words(text)), -date)
+
+    ordered = sorted(outcome.papers, key=rank_key)
+    chosen = ordered[:keep]
+    capped = (
+        SourceCoverage.capped(
+            "snowball:open:kept",
+            len(chosen),
+            cap=keep,
+            reported_total=len(ordered),
+            detail=f"kept the top {len(chosen)} of {len(ordered)} open-route neighbours "
+            "(seeds linked, then word overlap with the question and kept papers)",
+        )
+        if len(ordered) > len(chosen)
+        else None
+    )
+    papers = [
+        (
+            paper,
+            "snowball: " + ", ".join(outcome.routes.get(id(paper), [])),
+            float(len(outcome.routes.get(id(paper), []))),
+            outcome.evidence.get(id(paper), []),
+        )
+        for paper in chosen
+    ]
+    return papers, capped
 
 
 def _snowball(session: HuntSession, args: argparse.Namespace) -> int:
     forward = args.forward or not args.backward
     backward = args.backward or not args.forward
+    via = getattr(args, "via", None) or "both"
     keep = _width(session, args.max, 60, 200)
-    seeds = _seed_ids(session, args.seeds)
-    labels = dict(zip(seeds, args.seeds, strict=True))
     key = (
-        f"snowball|{','.join(sorted(seeds))}|{forward}|{backward}|{args.since}|{args.until}|"
-        f"{keep}|{args.edges}"
+        f"snowball|{','.join(sorted(args.seeds))}|{forward}|{backward}|{args.since}|{args.until}|"
+        f"{keep}|{args.edges}|{via}"
     )
     key += _retry_suffix(args)
     if (code := _guard(session, key, args)) is not None:
@@ -702,26 +836,69 @@ def _snowball(session: HuntSession, args: argparse.Namespace) -> int:
     started = time.time()
     kept = [c for c in session.candidates.values() if c.mark in ("core", "keep")]
     focus = " ".join([session.data["question"], *(c.paper.title or "" for c in kept)])
-    with request_deadline(started + MOVE_DEADLINES["snowball"]):
-        outcome, _ = run_snowball(
-            s2_connector(),
-            seeds,
+    open_future = None
+    pool = None
+    if via in ("both", "open"):
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        open_seeds = _open_seeds(session, args.seeds)
+        open_future = pool.submit(
+            run_open_snowball,
+            open_seeds,
             forward=forward,
             backward=backward,
             since=args.since,
             until=args.until,
-            keep=keep,
-            edge_cap=args.edges,
-            focus=focus,
-            labels=labels,
+            seconds=MOVE_DEADLINES["snowball"] - 10,
         )
+    steps: list[SourceCoverage] = []
     papers: list[tuple[Paper, str, float, list[str]]] = []
-    for paper in outcome.papers:
-        routes = outcome.routes.get(id(paper), [])
-        weight = sum(1.3 if "(" in r else 1.0 for r in routes)
-        papers.append(
-            (paper, "snowball: " + ", ".join(routes), weight, outcome.evidence.get(id(paper), []))
-        )
+    outcome: ExploreOutcome | None = None
+    if via in ("both", "s2"):
+        seeds = _seed_ids(session, args.seeds) if via == "s2" else _s2_seeds(session, args.seeds)
+        labels = dict(zip(seeds, [r for r, i in _s2_pairs(session, args.seeds) if i], strict=False))
+        if seeds:
+            with request_deadline(started + MOVE_DEADLINES["snowball"]):
+                outcome, _ = run_snowball(
+                    s2_connector(),
+                    seeds,
+                    forward=forward,
+                    backward=backward,
+                    since=args.since,
+                    until=args.until,
+                    keep=keep,
+                    edge_cap=args.edges,
+                    focus=focus,
+                    labels=labels,
+                )
+            steps += outcome.steps
+            for paper in outcome.papers:
+                routes = outcome.routes.get(id(paper), [])
+                weight = sum(1.3 if "(" in r else 1.0 for r in routes)
+                papers.append(
+                    (
+                        paper,
+                        "snowball: " + ", ".join(routes),
+                        weight,
+                        outcome.evidence.get(id(paper), []),
+                    )
+                )
+    if open_future is not None and pool is not None:
+        try:
+            opened = open_future.result()
+        except Exception as exc:
+            steps.append(
+                SourceCoverage.failed(
+                    "snowball:open", error=str(exc), error_type=type(exc).__name__
+                )
+            )
+        else:
+            steps += opened.steps
+            ranked, capped = _rank_open(opened, focus, keep)
+            if capped is not None:
+                steps.append(capped)
+            papers += ranked
+        finally:
+            pool.shutdown(wait=False)
     record = session.absorb(
         kind="snowball",
         replay=_replay(args, "snowball"),
@@ -730,17 +907,33 @@ def _snowball(session: HuntSession, args: argparse.Namespace) -> int:
             "seeds": " ".join(args.seeds),
             "direction": "both" if forward and backward else "forward" if forward else "backward",
             "since": str(args.since) if args.since else None,
+            "via": via if via != "both" else None,
         },
         started=started,
-        steps=outcome.steps,
+        steps=steps,
         papers=papers,
     )
-    crawled = _crawled_directions(session, args.seeds, outcome.steps, forward, backward)
+    crawled = _crawled_directions(session, args.seeds, steps, forward, backward)
     with session.locked():
         for ref, directions in crawled.items():
             done = session.data.setdefault("crawled", {}).setdefault(ref, [])
             done.extend(d for d in directions if d not in done)
-    return _emit_move(session, record, outcome.steps, args)
+    return _emit_move(session, record, steps, args)
+
+
+def _s2_pairs(session: HuntSession, refs: list[str]) -> list[tuple[str, str | None]]:
+    pairs: list[tuple[str, str | None]] = []
+    for ref in refs:
+        try:
+            pairs.append((ref, _seed_ids(session, [ref])[0]))
+        except InvalidParameterError:
+            pairs.append((ref, None))
+    return pairs
+
+
+def _s2_seeds(session: HuntSession, refs: list[str]) -> list[str]:
+    """Seeds Semantic Scholar can take; the others are left to the open routes."""
+    return [i for _, i in _s2_pairs(session, refs) if i]
 
 
 def _crawled_directions(
@@ -754,7 +947,7 @@ def _crawled_directions(
 
     A direction counts only when its edge step for that seed answered; a
     refused or failed step leaves the seed in the snowball queue.  Steps are
-    named ``snowball:<direction>:<seed title[:50]>``.  When no step's title
+    named ``snowball:<direction>:[<route>:]<seed title prefix>``.  When no step's title
     matches a seed (titles can differ between sources), the direction counts
     only if none of that direction's steps failed.
     """
@@ -768,10 +961,13 @@ def _crawled_directions(
         parts = step.source.split(":", 2)
         if len(parts) < 3 or parts[0] != "snowball" or parts[1] not in answered:
             continue
+        label = parts[2]
+        for route in ("openalex-fulltext:", "arxiv-source:"):
+            label = label.removeprefix(route)
         if step.status is CoverageStatus.FAILED:
             any_failed[parts[1]] = True
-        else:
-            answered[parts[1]].add(norm(parts[2]))
+        elif step.status in _ANSWERED:
+            answered[parts[1]].add(norm(label))
     result: dict[str, list[str]] = {}
     for ref in refs:
         if ref not in session.candidates:
@@ -782,7 +978,10 @@ def _crawled_directions(
             if not on:
                 continue
             labels = answered[direction]
-            if (title and title in labels) or (labels and not any_failed[direction]):
+            named = bool(title) and any(
+                label and (title.startswith(label) or label.startswith(title)) for label in labels
+            )
+            if named or (labels and not any_failed[direction]):
                 directions.append(direction)
         result[ref] = directions
     return result
@@ -827,24 +1026,35 @@ def _add(session: HuntSession, args: argparse.Namespace) -> int:
             papers=from_sets,
         )
         return _emit_move(session, record, steps, args)
-    connector = s2_connector()
+    from lit_search.connectors.openalex import OpenAlexConnector
+
+    by_ref, open_steps = lookup_papers(
+        OpenAlexConnector(api_key=credentials.get("OPENALEX_API_KEY")), args.refs
+    )
+    steps += open_steps
+    found: list[Paper] = [by_ref[r] for r in args.refs if r in by_ref]
+    missing = [r for r in args.refs if r not in by_ref]
+    connector = s2_connector() if missing else None
     ids: list[str] = []
     titles: list[str] = []
-    for ref in args.refs:
+    for ref in missing:
         try:
             ids.append(s2_request_id(ref))
         except InvalidParameterError:
             titles.append(ref)
-    found: list[Paper] = []
-    if ids:
-        by_id, step = _hydrate(connector, ids, "add:ids")
+    if ids and connector is not None:
+        with request_deadline(started + MOVE_DEADLINES["add"]):
+            by_id, step = _hydrate(connector, ids, "add:ids")
         steps.append(step)
         found += [by_id[i] for i in ids if i in by_id]
     from lit_search.connectors.semantic_scholar import _PAPER_FIELDS
 
     for title in titles:
+        if connector is None:
+            break
         try:
-            data = connector._get(_MATCH_URL, {"query": title, "fields": _PAPER_FIELDS}).json()
+            with request_deadline(started + MOVE_DEADLINES["add"]):
+                data = connector._get(_MATCH_URL, {"query": title, "fields": _PAPER_FIELDS}).json()
             item = (data.get("data") or [None])[0]
             paper = connector._parse_paper(item) if item else None
             if paper is None:
