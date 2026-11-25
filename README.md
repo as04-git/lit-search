@@ -39,7 +39,7 @@ move 2 search query=abs[state tracking] AND abs[linear RNN] · 2/2 sources answe
      │ question · budget · candidates c1..cN  │   handles     │
      │ routes · evidence · marks · notes      │◄─────────────►│
      │ moves: find related snippets snowball  │ (stored sets  │
-     │        add search read                 │  of papers)   │
+     │        add search read crawl           │  of papers)   │
      └─────────┬──────────────────────────────┘               │
                │                                   building blocks: search, snowball,
      sources: Semantic Scholar, OpenAlex, arXiv,   set algebra, rerank, index, export
@@ -55,6 +55,12 @@ move 2 search query=abs[state tracking] AND abs[linear RNN] · 2/2 sources answe
   (every citation edge of a seed, forward or backward, with the citing sentences), `add` (papers
   you already know), `search` (an exact-term Boolean sweep), and `read` (a candidate's intro or
   related-work section, from its PDF).
+- **The workspace remembers and explains itself.** `hunt crawl` runs a level-by-level citation
+  crawl in the background while the hunt goes on. A candidate judged in an earlier hunt shows
+  what was decided and why. The unjudged queue can be ordered by likeness to the papers already
+  kept. The report includes a vocabulary log (every phrasing searched, what it reached, and terms
+  common in kept papers that no query used) and per-provider coverage (steps answered, failed,
+  unable to run the query, papers returned).
 - **Handles connect hunts to everything else.** A handle is an immutable, content-addressed set
   of papers with its coverage and lineage. Each report writes two (shortlist and all
   candidates). `hunt add --from HANDLE` starts from a set; `hunt start --exclude HANDLE` leaves

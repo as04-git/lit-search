@@ -43,7 +43,8 @@ lit-search hunt show ID c3 c9            # abstract, authors, routes, citation s
 lit-search hunt read ID c3 [--part intro|related|conclusion]   # the paper itself (PDF)
 lit-search hunt rank ID c9 c3 c14        # your final order, best first; leads the shortlist
 lit-search hunt mark ID c3 --core|--keep|--drop --note "why"
-lit-search hunt status ID [--unjudged] [--top 15 --from 16]   # page through what you have not judged
+lit-search hunt status ID [--unjudged] [--top 15 --from 16]   # unjudged: most like your kept papers first
+lit-search hunt crawl ID [c3 c7] [--depth 2] [--per-level 8] &  # background citation crawl, level by level
 lit-search hunt retry ID [N ... | --all] [--wait 15]   # re-run moves that lost sources to rate limits
 lit-search hunt report ID --shortlist N
 ```
@@ -60,6 +61,18 @@ the building-block commands (`search`, `snowball`, `set`, `rerank`, `export`) re
 them. `--from` starts a hunt from an earlier set; `--exclude` (or `hunt exclude ID HANDLE`) leaves
 out papers already known, so a follow-up hunt shows only what is new. `search` is for exact
 terms a relevance engine would blur; `find` is the better first move.
+
+- **Vocabulary.** `hunt status` and the report list every phrasing you searched and what it
+  reached, plus words common in your kept papers that no query has used. Use the log to avoid
+  repeating yourself, not as the edge of the search: actively try terms that are in no log,
+  such as the words a neighbouring field would use, older or newer names for the idea, and
+  the vocabulary of papers you dropped as off-topic but close. A hunt that only rephrases its
+  first query stays inside one community's bubble.
+- **Memory.** A candidate judged in an earlier hunt shows `seen before: kept in hunt-… ("why")`
+  or `dropped in …`. Treat it as a prior, not a verdict: the earlier question may differ.
+- **Crawl.** `hunt crawl` snowballs the core and kept papers, then the most promising new papers
+  of each level, until `--depth` levels or `--minutes` pass. Start it in the background once you
+  have a few kept papers and keep working; its moves land in the hunt as they finish.
 
 Every move ends with time left and the core/kept papers not yet snowballed in each direction.
 A `FAIL` or cooling-down line means a source did not answer (usually a rate limit), not that it
