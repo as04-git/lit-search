@@ -36,8 +36,8 @@ lit-search hunt start "<question>" --profile prior-art|orient|frontier|known-ite
 lit-search hunt add ID 2404.08819 "Exact title of a paper you know" [--from HANDLE]
 lit-search hunt find ID <3-7 words> [--since YYYY-MM-DD] [-d arxiv]
 lit-search hunt search ID 'abs[model checking] AND abs[specification]'   # exact-term Boolean sweep
-lit-search hunt snowball ID c3 c7 [--forward | --backward] [--since YYYY-MM-DD]
-lit-search hunt related ID c3            # Semantic Scholar recommendations + a small citation hop
+lit-search hunt snowball ID c3 c7 [--forward | --backward] [--since YYYY-MM-DD] [--via both|s2|open]
+lit-search hunt related ID c3 [--via both|s2|open]   # recommendations + a small citation hop
 lit-search hunt snippets ID "<a sentence a paper would literally contain>"
 lit-search hunt show ID c3 c9            # abstract, authors, routes, citation sentences
 lit-search hunt read ID c3 [--part intro|related|conclusion]   # the paper itself (PDF)
@@ -47,6 +47,13 @@ lit-search hunt status ID [--unjudged] [--top 15 --from 16]   # page through wha
 lit-search hunt retry ID [N ... | --all] [--wait 15]   # re-run moves that lost sources to rate limits
 lit-search hunt report ID --shortlist N
 ```
+
+`snowball` and `related` ask two independent providers at once, so one refusing does not empty
+the move. Semantic Scholar gives its citation graph, recommendations and citation sentences. The
+open routes need no Semantic Scholar: references read from the seed's arXiv source (`cited by c3
+[source]`, with the sentence citing each one), citers found by OpenAlex full-text search for the
+seed's title (`cites c3 [fulltext]`, unverified: a paper may name the title without citing it),
+and OpenAlex's similar and recent papers (`similar#n`, `recent#n`).
 
 A handle is a stored set of papers: every report writes two (shortlist and all candidates), and
 the building-block commands (`search`, `snowball`, `set`, `rerank`, `export`) read and write

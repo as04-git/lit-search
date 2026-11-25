@@ -131,7 +131,12 @@ dropped records without a DOI. Hence:
 3. **Identity is narrow.** Records merge only on exact, version-aware identifiers; title matches
    and embeddings are evidence, never a destructive merge. Preprint and published versions stay
    linked rather than collapsed.
-4. **Measure, then change.** `lit-search eval usage` summarises saved hunts (failures per
+4. **No single provider is load-bearing.** Semantic Scholar's citation graph is the best there
+   is and refuses about half of all requests. The citation moves also run open routes: a seed's
+   references from its own arXiv LaTeX source, and its citers from OpenAlex full-text search.
+   On 16 recent arXiv seeds these recovered 95% of Semantic Scholar's linked references and 77%
+   of its citers, plus about a quarter more citers it lacked.
+5. **Measure, then change.** `lit-search eval usage` summarises saved hunts (failures per
    source, which moves first reached kept papers); `eval replay` and `eval bench` re-run recorded
    moves against graded cases in [`docs/confidence/cases.json`](docs/confidence/cases.json).
    One finding that shaped the tool: ordering each move's new candidates by a cross-encoder put
