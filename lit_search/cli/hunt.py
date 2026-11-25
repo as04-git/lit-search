@@ -1218,7 +1218,7 @@ def _crawl(session: HuntSession, args: argparse.Namespace) -> int:
             record = session.data["crawls"][number - 1]
             if "level" in fields:
                 record["levels"].append(fields.pop("level"))
-            record.update(fields)
+            record.update(fields, updated=time.time())
 
     stopped = "depth reached"
     for level in range(1, args.depth + 1):

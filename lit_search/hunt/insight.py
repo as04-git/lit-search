@@ -15,6 +15,7 @@ from __future__ import annotations
 import itertools
 import math
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -279,10 +280,14 @@ def coverage_lines(session: HuntSession) -> list[str]:
     )
     crawls = session.data.get("crawls") or []
     for crawl in crawls:
+        stopped = crawl.get("stopped")
+        if not stopped:
+            last = float(crawl.get("updated") or crawl.get("started") or 0)
+            stopped = "interrupted" if time.time() - last > 1800 else "still running"
         lines.append(
             f"crawl from {' '.join(crawl['seeds'])}: depth {crawl['depth_reached']} of "
             f"{crawl['depth']}, {sum(level['new'] for level in crawl['levels'])} new candidates, "
-            f"stopped: {crawl.get('stopped') or 'still running'}"
+            f"stopped: {stopped}"
         )
     return lines
 
@@ -314,8 +319,117 @@ def phrasings(session: HuntSession) -> list[Phrasing]:
     return rows
 
 
+#: Words that are common in abstracts of any field and say nothing about the topic.
+_GENERIC = frozenset(
+    [
+        "ability",
+        "able",
+        "achieve",
+        "achieves",
+        "address",
+        "alternative",
+        "alternatives",
+        "analysis",
+        "analyze",
+        "applied",
+        "apply",
+        "art",
+        "benchmark",
+        "benchmarks",
+        "better",
+        "capabilities",
+        "challenge",
+        "challenges",
+        "competitive",
+        "complex",
+        "comprehensive",
+        "crucial",
+        "current",
+        "demonstrate",
+        "demonstrates",
+        "design",
+        "develop",
+        "emerged",
+        "empirical",
+        "enable",
+        "enables",
+        "evaluate",
+        "evaluation",
+        "evidence",
+        "experiments",
+        "extensive",
+        "findings",
+        "focus",
+        "furthermore",
+        "general",
+        "given",
+        "high",
+        "however",
+        "identify",
+        "important",
+        "including",
+        "introduce",
+        "key",
+        "known",
+        "lack",
+        "leading",
+        "leverage",
+        "limitations",
+        "limited",
+        "many",
+        "modeling",
+        "moreover",
+        "natural",
+        "notably",
+        "often",
+        "outperform",
+        "outperforms",
+        "paradigm",
+        "particular",
+        "possible",
+        "potential",
+        "powerful",
+        "practical",
+        "present",
+        "previous",
+        "prior",
+        "provide",
+        "recently",
+        "remains",
+        "require",
+        "requires",
+        "research",
+        "respectively",
+        "several",
+        "show",
+        "showing",
+        "shown",
+        "significant",
+        "simple",
+        "strong",
+        "study",
+        "success",
+        "successful",
+        "suggest",
+        "superior",
+        "theoretical",
+        "theory",
+        "thus",
+        "traditional",
+        "understanding",
+        "various",
+        "wide",
+        "widely",
+    ]
+)
+
+
 def _terms(text: str) -> set[str]:
-    words = [w for w in _WORD_RE.findall(text.casefold()) if w not in _STOPWORDS and len(w) > 2]
+    words = [
+        w
+        for w in _WORD_RE.findall(text.casefold())
+        if w not in _STOPWORDS and w not in _GENERIC and len(w) > 2
+    ]
     bigrams = {f"{a} {b}" for a, b in itertools.pairwise(words)}
     return set(words) | bigrams
 
@@ -343,7 +457,11 @@ def unexplored_terms(session: HuntSession, limit: int = 10) -> list[str]:
     total = len(documents)
     scored = []
     for term, count in in_kept.items():
-        if count < 2 or term in used or any(w in used_words for w in term.split()):
+        parts = term.replace("-", " ").split()
+        if count < 2 or term in used or any(w in used_words for w in parts):
+            continue
+        lift = (count / len(kept)) / ((frequency[term] + 1) / (total + 1))
+        if total >= 10 and lift < 2:
             continue
         idf = math.log((1 + total) / (1 + frequency[term]))
         scored.append((count * idf * (1.3 if " " in term else 1.0), term))
