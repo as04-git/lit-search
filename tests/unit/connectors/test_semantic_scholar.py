@@ -300,6 +300,20 @@ class TestSemanticScholarConnectorParsePaper:
         assert paper is not None
         assert paper.doi == "10.48550/arXiv.1706.03762"
 
+    def test_arxiv_id_under_the_key_the_api_actually_returns(self):
+        """The live API names the key ``ArXiv``; a published paper keeps its arXiv id too."""
+        from lit_search.core.citation import IdentifierKind
+
+        item = {
+            "title": "A Paper",
+            "externalIds": {"DOI": "10.52202/085713-5141", "ArXiv": "2502.10297"},
+        }
+        paper = SemanticScholarConnector()._parse_paper(item)
+        assert paper is not None
+        assert paper.doi == "10.52202/085713-5141"
+        kinds = {i.kind: i.value for i in paper.identifiers}
+        assert kinds[IdentifierKind.ARXIV] == "2502.10297"
+
     def test_explicit_doi_takes_priority_over_arxiv_id(self):
         """externalIds.DOI takes priority over ArXivId derivation."""
         item = {

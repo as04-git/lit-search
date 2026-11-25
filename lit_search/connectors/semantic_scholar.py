@@ -764,7 +764,7 @@ class SemanticScholarConnector(
         external_ids = item.get("externalIds") or {}
         doi = (external_ids.get("DOI") or "").strip() or None
         if doi is None:
-            arxiv_id = (external_ids.get("ArXivId") or "").strip()
+            arxiv_id = (external_ids.get("ArXiv") or external_ids.get("ArXivId") or "").strip()
             if arxiv_id:
                 doi = f"10.48550/arXiv.{arxiv_id}"
         return doi
@@ -778,7 +778,7 @@ class SemanticScholarConnector(
             identifiers.append(PaperIdentifier(IdentifierKind.SEMANTIC_SCHOLAR, paper_id))
         external_ids = item.get("externalIds") or {}
         if isinstance(external_ids, dict):
-            arxiv_id = (external_ids.get("ArXivId") or "").strip()
+            arxiv_id = (external_ids.get("ArXiv") or external_ids.get("ArXivId") or "").strip()
             doi = (external_ids.get("DOI") or "").strip()
             if arxiv_id:
                 identifiers.append(PaperIdentifier(IdentifierKind.ARXIV, arxiv_id))
