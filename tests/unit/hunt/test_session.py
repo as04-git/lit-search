@@ -454,15 +454,48 @@ class TestHuntWorkspaceAndHandles:
         )
         with patch("lit_search.engine.Engine.search", return_value=result) as search:
             assert self._run(tmp_path, "hunt", "search", hunt_id, "abs[model checking]") == 0
-        assert search.call_args.kwargs["databases"] == [
+        assert search.call_args.kwargs["databases"] == ["openalex", "arxiv"]
+        out = capsys.readouterr().out
+        assert "move 1 search" in out
+        assert "1/2 sources answered" in out
+        session = HuntSession.load(hunt_id, root=tmp_path / "hunts")
+        assert session.candidates["c1"].routes[0]["label"] == "search#1"
+        assert [m["number"] for m in session.failed_moves()] == [1]
+
+
+class TestStepAccounting:
+    def test_unsupported_query_is_not_counted_as_answered(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from lit_search.core.coverage import CoverageLedger
+        from lit_search.core.search_result import SearchResult
+
+        with patch.dict("os.environ", {"LIT_SEARCH_HOME": str(tmp_path)}):
+            assert main(["hunt", "start", "q", "--profile", "known-item", "--json"]) == 0
+            hunt_id = json.loads(capsys.readouterr().out)["hunt"]
+            result = SearchResult(
+                query="[x]",
+                papers=[_paper("Some paper title here", "10.1/x")],
+                coverage=CoverageLedger(
+                    [
+                        SourceCoverage.complete("openalex", 1, reported_total=1),
+                        SourceCoverage.query_unsupported("dblp", detail="no abstracts"),
+                    ]
+                ),
+            )
+            with patch("lit_search.engine.Engine.search", return_value=result):
+                assert main(["hunt", "search", hunt_id, "[x]", "-d", "openalex", "-d", "dblp"]) == 0
+        out = capsys.readouterr().out
+        assert "1/2 sources answered" in out
+        assert "unsupported dblp: no abstracts" in out
+
+    def test_search_defaults_follow_the_query_filters(self) -> None:
+        from lit_search.cli.hunt import _search_defaults
+
+        assert _search_defaults("abs[state tracking]") == ["openalex", "arxiv"]
+        assert _search_defaults("[state tracking]") == [
             "openalex",
             "semantic_scholar",
             "arxiv",
             "dblp",
         ]
-        out = capsys.readouterr().out
-        assert "move 1 search" in out
-        assert "1/2 steps ok" in out
-        session = HuntSession.load(hunt_id, root=tmp_path / "hunts")
-        assert session.candidates["c1"].routes[0]["label"] == "search#1"
-        assert [m["number"] for m in session.failed_moves()] == [1]

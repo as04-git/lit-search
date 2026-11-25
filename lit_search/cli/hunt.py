@@ -72,8 +72,29 @@ from lit_search.utils.relevance import relevance_scores
 MOVE_DEADLINES = {"related": 60.0, "snippets": 45.0, "snowball": 150.0}
 
 #: Databases a hunt's Boolean ``search`` move queries unless told otherwise: broad,
-#: keyless, and answering Boolean queries natively.
+#: keyless, and answering Boolean queries natively.  Only those that can express the
+#: query's field filters are used (``_search_defaults``).
 HUNT_SEARCH_DEFAULT = ("openalex", "semantic_scholar", "arxiv", "dblp")
+
+
+def _search_defaults(query: str) -> list[str]:
+    """Default databases able to run *query*; all defaults if the query does not parse."""
+    from lit_search.query import builders
+    from lit_search.query.builder import QueryBuilder
+    from lit_search.query.parser import QueryParser
+
+    classes: dict[str, type[QueryBuilder]] = {
+        "openalex": builders.OpenAlexQueryBuilder,
+        "semantic_scholar": builders.SemanticScholarQueryBuilder,
+        "arxiv": builders.ArxivQueryBuilder,
+        "dblp": builders.DBLPQueryBuilder,
+    }
+    try:
+        parsed = QueryParser().parse(query)
+    except Exception:
+        return list(HUNT_SEARCH_DEFAULT)
+    usable = [n for n in HUNT_SEARCH_DEFAULT if classes[n]().validate_query(parsed).is_valid]
+    return usable or list(HUNT_SEARCH_DEFAULT)
 
 
 def _rank_weight(rank: int, scale: float = 1.0) -> float:
@@ -231,7 +252,8 @@ def add_hunt_parser(subparsers: argparse._SubParsersAction, parents: list) -> No
         dest="databases",
         choices=SEARCH_DATABASES,
         metavar="DB",
-        help=f"repeatable (default: {', '.join(HUNT_SEARCH_DEFAULT)})",
+        help=f"repeatable (default: those of {', '.join(HUNT_SEARCH_DEFAULT)} that support "
+        "the query's filters)",
     )
     search.add_argument(
         "--max", type=positive_int, default=None, help="per database (default 50; 200 when --wide)"
@@ -397,9 +419,17 @@ def _candidate_line(candidate: Candidate, *, abstract: bool, width: int = 240) -
     return lines
 
 
+#: Statuses under which a source actually ran the move; anything else did not answer it.
+_ANSWERED = frozenset({CoverageStatus.COMPLETE, CoverageStatus.CAPPED, CoverageStatus.PARTIAL})
+
+
 def _step_problem(step: SourceCoverage) -> str | None:
     if step.status is CoverageStatus.FAILED:
         return f"  FAIL {step.source}: {step.error_type}: {_short(step.error)[:160]}"
+    if step.status is CoverageStatus.QUERY_UNSUPPORTED:
+        return f"  unsupported {step.source}: {_short(step.detail)[:160]}"
+    if step.status in (CoverageStatus.SKIPPED_NO_CREDENTIAL, CoverageStatus.SKIPPED_BY_POLICY):
+        return f"  skipped {step.source}: {_short(step.detail)[:160]}"
     if step.execution_status is not ExecutionStatus.COMPLETE:
         return f"  part {step.source}: {_short(step.detail)[:160]}"
     return None
@@ -408,7 +438,7 @@ def _step_problem(step: SourceCoverage) -> str | None:
 def _emit_move(
     session: HuntSession, record: MoveRecord, steps: list[SourceCoverage], args: argparse.Namespace
 ) -> int:
-    answered = [s for s in steps if s.status is not CoverageStatus.FAILED]
+    answered = [s for s in steps if s.status in _ANSWERED]
     new, order_by = _order_new(session, record.new)
     with session.locked():
         for logged in session.data["moves"]:
@@ -429,7 +459,7 @@ def _emit_move(
         label = " ".join(f"{k}={v}" for k, v in record.args.items() if v not in (None, [], False))
         again = f" ({' '.join(record.again[:12])}{' ...' if len(record.again) > 12 else ''})"
         lines = [
-            f"move {record.number} {record.kind} {label} · {len(answered)}/{len(steps)} steps ok · "
+            f"move {record.number} {record.kind} {label} · {len(answered)}/{len(steps)} sources answered · "
             f"{record.seconds:.1f}s · +{len(record.new)} new, {len(record.again)} again"
             + (again if record.again else "")
             + (f", {record.excluded} excluded as known" if record.excluded else "")
@@ -848,7 +878,7 @@ def _search(session: HuntSession, args: argparse.Namespace) -> int:
     from lit_search.engine import Engine
 
     args.max = _width(session, args.max, 50, 200)
-    databases = list(dict.fromkeys(args.databases or HUNT_SEARCH_DEFAULT))
+    databases = list(dict.fromkeys(args.databases or _search_defaults(args.query)))
     key = (
         f"search|{args.query.strip()}|{args.max}|{args.since}|{args.until}|{','.join(databases)}"
         + _retry_suffix(args)
