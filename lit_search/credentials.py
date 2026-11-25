@@ -172,6 +172,26 @@ SETTINGS: tuple[Setting, ...] = (
         "FINDPAPERS_CHEMRXIV_EMAIL",
     ),
     Setting(
+        "VOYAGE_API_KEY",
+        "general",
+        True,
+        "Voyage AI key (dash.voyageai.com; the first 200M rerank tokens are free): hunt moves "
+        "list new candidates by relevance to the question with Voyage's reranker",
+    ),
+    Setting(
+        "LIT_SEARCH_VOYAGE_MODEL",
+        "general",
+        False,
+        "Voyage reranker model (default rerank-3; rerank-3-lite is faster)",
+    ),
+    Setting(
+        "LIT_SEARCH_RELEVANCE",
+        "general",
+        False,
+        "relevance ordering backend: auto (default: Voyage if keyed, else the local service), "
+        "voyage, local, or off",
+    ),
+    Setting(
         "LIT_SEARCH_RERANK_URL",
         "general",
         False,

@@ -454,6 +454,31 @@ def run_doctor(offline: bool) -> list[Check]:
             Check("contact email", "info", "LIT_SEARCH_EMAIL not set", _set_fix("LIT_SEARCH_EMAIL"))
         )
 
+    from lit_search.utils.relevance import relevance_backend, relevance_scores
+
+    backend = relevance_backend()
+    if backend in ("voyage", "local") and not offline:
+        scored = relevance_scores("state tracking", ["parity in linear RNNs", "coffee"], timeout=8)
+        checks.append(
+            Check(
+                "relevance order",
+                "ok" if scored else "warn",
+                f"{scored[1]} answered"
+                if scored
+                else f"{backend} did not answer; moves keep the hunt's own order",
+                "" if scored else "check VOYAGE_API_KEY / LIT_SEARCH_RERANK_URL",
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "relevance order",
+                "info" if backend == "off" else "warn",
+                f"{backend}; new candidates are listed in the hunt's own order",
+                "" if backend == "off" else _set_fix("VOYAGE_API_KEY"),
+            )
+        )
+
     checks.append(
         Check(
             "pdftotext",
