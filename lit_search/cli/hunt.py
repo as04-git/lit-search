@@ -39,6 +39,8 @@ from lit_search.core.coverage import CoverageLedger, CoverageStatus, ExecutionSt
 from lit_search.core.paper import Paper
 from lit_search.core.search_result import SearchResult
 from lit_search.exceptions import InvalidParameterError
+from lit_search.hunt.insight import coverage_lines, unexplored_terms, vocabulary_lines
+from lit_search.hunt.memory import JudgmentMemory, describe
 from lit_search.hunt.session import (
     DEFAULT_MINUTES,
     DEFAULT_SHORTLIST,
@@ -79,7 +81,7 @@ from lit_search.runners.open_graph import (
 from lit_search.store.operations import from_search_result
 from lit_search.utils import latex_bib
 from lit_search.utils.rate_limit import request_deadline
-from lit_search.utils.relevance import relevance_scores
+from lit_search.utils.relevance import lexical_similarity, relevance_scores
 
 #: Wall-clock seconds a Semantic Scholar move may spend, waiting for request slots included.
 #: Past it, a step reports itself busy (nothing is sent) instead of stalling the hunt.
@@ -331,6 +333,31 @@ def add_hunt_parser(subparsers: argparse._SubParsersAction, parents: list) -> No
         help="keep re-running still-failing moves, a minute apart, for up to this long",
     )
 
+    crawl = actions.add_parser(
+        "crawl",
+        parents=parents,
+        help="breadth-first citation crawl, level by level; the most promising new papers of "
+        "each level seed the next (run it in the background while the hunt goes on)",
+    )
+    crawl.add_argument("hunt")
+    crawl.add_argument("seeds", nargs="*", help="candidate ids (default: the core and kept papers)")
+    crawl.add_argument("--depth", type=positive_int, default=2, help="levels (default 2)")
+    crawl.add_argument(
+        "--per-level",
+        type=positive_int,
+        default=8,
+        help="new papers that seed the next level, chosen by likeness to the kept papers "
+        "(default 8)",
+    )
+    crawl.add_argument(
+        "--minutes", type=float, default=20.0, help="stop starting new levels after this long"
+    )
+    crawl.add_argument("--forward", action="store_true", help="only citing papers")
+    crawl.add_argument("--backward", action="store_true", help="only references")
+    crawl.add_argument("--since", type=iso_date, metavar="YYYY-MM-DD")
+    crawl.add_argument("--until", type=iso_date, metavar="YYYY-MM-DD")
+    crawl.add_argument("--via", choices=("both", "s2", "open"), default="both")
+
     exclude = actions.add_parser(
         "exclude",
         parents=parents,
@@ -383,6 +410,13 @@ def add_hunt_parser(subparsers: argparse._SubParsersAction, parents: list) -> No
         action="store_true",
         help="list only top candidates not yet marked, with abstracts (review before the report)",
     )
+    status.add_argument(
+        "--order",
+        choices=("auto", "keepers", "score"),
+        default="auto",
+        help="unjudged order: likeness to the core/kept papers once there are any (auto, "
+        "keepers), or the hunt's score",
+    )
 
     extend = actions.add_parser("extend", parents=parents, help="add minutes to the budget")
     extend.add_argument("hunt")
@@ -427,7 +461,33 @@ def _footer(session: HuntSession) -> str:
     )
 
 
-def _candidate_line(candidate: Candidate, *, abstract: bool, width: int = 240) -> list[str]:
+_MEMORY: list[JudgmentMemory] = []
+
+
+def _memory() -> JudgmentMemory | None:
+    """The cross-hunt judgment index, built once per process; ``None`` if unreadable."""
+    if not _MEMORY:
+        try:
+            _MEMORY.append(JudgmentMemory(hunts_root()))
+        except Exception:
+            return None
+    return _MEMORY[0]
+
+
+def _seen_before(session: HuntSession | None, candidate: Candidate) -> str:
+    memory = _memory() if session is not None else None
+    if memory is None or session is None:
+        return ""
+    return describe(memory.lookup(candidate.paper, exclude_hunt=session.data["id"]))
+
+
+def _candidate_line(
+    candidate: Candidate,
+    *,
+    abstract: bool,
+    width: int = 240,
+    session: HuntSession | None = None,
+) -> list[str]:
     paper = candidate.paper
     date = paper.publication_date.strftime("%Y-%m") if paper.publication_date else "n.d."
     cited = f" · cited {paper.citations}" if paper.citations is not None else ""
@@ -439,6 +499,8 @@ def _candidate_line(candidate: Candidate, *, abstract: bool, width: int = 240) -
     if candidate.evidence:
         sentence = textwrap.shorten(candidate.evidence[-1], width=240, placeholder=" ...")
         lines.append(f'       evidence: "{sentence}"')
+    if seen := _seen_before(session, candidate):
+        lines.append(f"       seen before: {seen}")
     if abstract and paper.abstract:
         snippet = textwrap.shorten(paper.abstract, width=width, placeholder=" ...")
         lines += textwrap.wrap(
@@ -500,7 +562,10 @@ def _emit_move(
             lines.append(f"  new candidates by score ({len(new)}); `hunt show` for full abstracts:")
         for cid in new:
             lines += _candidate_line(
-                session.candidates[cid], abstract=not args.brief, width=160 if wide else 240
+                session.candidates[cid],
+                abstract=not args.brief,
+                width=160 if wide else 240,
+                session=session,
             )
         lines.append(_footer(session))
         emit_text("\n".join(lines))
@@ -908,6 +973,7 @@ def _snowball(session: HuntSession, args: argparse.Namespace) -> int:
             "direction": "both" if forward and backward else "forward" if forward else "backward",
             "since": str(args.since) if args.since else None,
             "via": via if via != "both" else None,
+            "crawl": getattr(args, "crawl", None),
         },
         started=started,
         steps=steps,
@@ -1123,6 +1189,95 @@ def _search(session: HuntSession, args: argparse.Namespace) -> int:
     return _emit_move(session, record, steps, args)
 
 
+def _crawl(session: HuntSession, args: argparse.Namespace) -> int:
+    forward = args.forward or not args.backward
+    backward = args.backward or not args.forward
+    wanted = [d for d, on in (("forward", forward), ("backward", backward)) if on]
+    frontier = list(args.seeds) or [c.cid for c in session.ranked() if c.mark in ("core", "keep")]
+    if not frontier:
+        emit_text("nothing to crawl: name seeds, or mark core/kept papers first")
+        return EXIT_ERROR
+    started = time.time()
+    with session.locked():
+        crawls = session.data.setdefault("crawls", [])
+        number = len(crawls) + 1
+        crawls.append(
+            {
+                "number": number,
+                "seeds": frontier,
+                "depth": args.depth,
+                "depth_reached": 0,
+                "levels": [],
+                "started": started,
+                "stopped": None,
+            }
+        )
+
+    def update(**fields: Any) -> None:
+        with session.locked():
+            record = session.data["crawls"][number - 1]
+            if "level" in fields:
+                record["levels"].append(fields.pop("level"))
+            record.update(fields)
+
+    stopped = "depth reached"
+    for level in range(1, args.depth + 1):
+        if time.time() - started > args.minutes * 60:
+            stopped = "time limit"
+            break
+        crawled = session.data.get("crawled") or {}
+        todo = [r for r in frontier if not all(d in crawled.get(r, []) for d in wanted)]
+        first_move = len(session.data["moves"]) + 1
+        for ref in todo:
+            move = argparse.Namespace(
+                hunt=args.hunt,
+                seeds=[ref],
+                forward=args.forward,
+                backward=args.backward,
+                since=args.since,
+                until=args.until,
+                max=None,
+                edges=2000,
+                via=args.via,
+                json=False,
+                quiet=True,
+                brief=True,
+                overtime=True,
+                retry_of=None,
+                crawl=f"{number}.{level}",
+            )
+            _snowball(session, move)
+        with session.locked():
+            moves = session.data["moves"][first_move - 1 :]
+        new = list(dict.fromkeys(c for m in moves for c in m["new"]))
+        update(
+            level={
+                "level": level,
+                "seeds": todo,
+                "moves": [m["number"] for m in moves],
+                "new": len(new),
+            },
+            depth_reached=level,
+        )
+        if not args.quiet:
+            emit_text(
+                f"crawl {number} level {level}: {len(todo)} seeds, {len(moves)} moves, "
+                f"+{len(new)} new"
+            )
+        if not new:
+            stopped = "no new papers"
+            break
+        fresh = [session.candidates[c] for c in new if session.candidates[c].mark != "drop"]
+        ordered, _ = _keeper_order(session, fresh)
+        if ordered is fresh:
+            ordered = [session.candidates[c] for c in _order_new(session, new)[0]]
+        frontier = [c.cid for c in ordered[: args.per_level]]
+    update(stopped=stopped, seconds=round(time.time() - started))
+    if not args.quiet:
+        emit_text(f"crawl {number} stopped: {stopped}\n{_footer(session)}")
+    return EXIT_OK
+
+
 def _exclude_handles(session: HuntSession, args: argparse.Namespace, refs: list[str]) -> str:
     parts = []
     for handle_id, members in _handle_members(args, refs):
@@ -1171,7 +1326,7 @@ def _show(session: HuntSession, args: argparse.Namespace) -> int:
     lines: list[str] = []
     for candidate in chosen:
         paper = candidate.paper
-        lines += _candidate_line(candidate, abstract=False)
+        lines += _candidate_line(candidate, abstract=False, session=session)
         if paper.abstract:
             lines += textwrap.wrap(
                 paper.abstract, width=100, initial_indent="       ", subsequent_indent="       "
@@ -1396,10 +1551,39 @@ def _note(session: HuntSession, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _keeper_order(session: HuntSession, candidates: list[Candidate]) -> tuple[list[Candidate], str]:
+    """Order unjudged candidates by likeness to the core and kept papers.
+
+    The relevance backend scores each candidate against the kept papers' titles;
+    without one, a word-overlap (tf-idf cosine) similarity stands in.  With no
+    kept papers yet, the hunt's own order stands.
+    """
+    keepers = [c for c in session.ranked() if c.mark in ("core", "keep")][:12]
+    if not keepers or len(candidates) < 2:
+        return candidates, "mark then score"
+    pool = candidates[:200]
+    docs = [f"{c.paper.title or ''}. {c.paper.abstract or ''}" for c in pool]
+    query = "Papers like these: " + "; ".join(k.paper.title or "" for k in keepers)
+    scored = relevance_scores(query, docs)
+    if scored is not None:
+        scores, model = scored
+        label = f"likeness to {len(keepers)} kept papers ({model})"
+    else:
+        scores = lexical_similarity(
+            [f"{k.paper.title}. {k.paper.abstract or ''}" for k in keepers], docs
+        )
+        label = f"likeness to {len(keepers)} kept papers (word overlap)"
+    order = sorted(range(len(pool)), key=lambda i: -scores[i])
+    return [pool[i] for i in order] + candidates[200:], label
+
+
 def _status(session: HuntSession, args: argparse.Namespace) -> int:
     ranked = session.ranked()
+    order = "mark then score"
     if args.unjudged:
         ranked = [c for c in ranked if c.mark is None]
+        if getattr(args, "order", "auto") != "score":
+            ranked, order = _keeper_order(session, ranked)
     first = getattr(args, "start_at", 1)
     page = ranked[first - 1 : first - 1 + args.top]
     if args.json:
@@ -1423,11 +1607,16 @@ def _status(session: HuntSession, args: argparse.Namespace) -> int:
             for m in session.data["moves"]
         ),
         *session.shortfalls(),
+        *(
+            [f"untried vocabulary (in kept papers, in no query): {', '.join(terms)}"]
+            if (terms := unexplored_terms(session, limit=8))
+            else []
+        ),
         f"{'unjudged ' if args.unjudged else ''}candidates {first}-{first + len(page) - 1} of "
-        f"{len(ranked)} by mark then score:",
+        f"{len(ranked)} by {order}:",
     ]
     for candidate in page:
-        lines += _candidate_line(candidate, abstract=args.unjudged)
+        lines += _candidate_line(candidate, abstract=args.unjudged, session=session)
     if first + len(page) <= len(ranked):
         lines.append(
             f"  next page: hunt status {session.data['id']} "
@@ -1445,6 +1634,11 @@ def _report(session: HuntSession, args: argparse.Namespace) -> int:
             "left. Spend it: snowball the papers listed as not yet snowballed, search a "
             "vocabulary you have not tried, or go deeper on your best candidates (`hunt show`, "
             "`hunt read`) and set the final order with `hunt rank`."
+            + (
+                f"\nuntried vocabulary from kept papers: {', '.join(terms)}"
+                if (terms := unexplored_terms(session, limit=8))
+                else ""
+            )
         )
         return EXIT_INCOMPLETE
     report_blockers = session.report_blockers()
@@ -1486,6 +1680,8 @@ def _report(session: HuntSession, args: argparse.Namespace) -> int:
         )
         if candidate.note:
             lines.append(f"   - why: {candidate.note}")
+        if seen := _seen_before(session, candidate):
+            lines.append(f"   - seen before: {seen}")
         lines.append(
             "   - found by: "
             + "; ".join(f"move {r['move']} {r['label']}" for r in candidate.routes[:4])
@@ -1503,6 +1699,8 @@ def _report(session: HuntSession, args: argparse.Namespace) -> int:
     for move in moves:
         detail = " ".join(f"{k}={v}" for k, v in move["args"].items() if v)
         lines.append(f"- move {move['number']} {move['kind']} {detail} → +{len(move['new'])} new")
+    lines += ["", "## Vocabulary", "", *vocabulary_lines(session)]
+    lines += ["", "## Coverage", "", *coverage_lines(session)]
     log = session.reasoning_log()
     if log:
         lines += ["", "## Reasoning log", "", *log]
@@ -1639,6 +1837,7 @@ def cmd_hunt(args: argparse.Namespace) -> int:
         "add": _add,
         "search": _search,
         "exclude": _exclude,
+        "crawl": _crawl,
         "rank": _rank,
         "retry": _retry,
         "read": _read,

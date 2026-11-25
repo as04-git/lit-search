@@ -117,6 +117,46 @@ def relevance_scores(
     return None
 
 
+def lexical_similarity(references: list[str], documents: list[str]) -> list[float]:
+    """Mean tf-idf cosine of each document to the *references*; no services needed.
+
+    Parameters
+    ----------
+    references : list[str]
+        Texts to be like (for example a hunt's kept papers).
+    documents : list[str]
+        Texts to score.
+
+    Returns
+    -------
+    list[float]
+        One score per document, higher is more alike.
+    """
+    import math
+    import re
+    from collections import Counter
+
+    def words(text: str) -> Counter[str]:
+        return Counter(w for w in re.findall(r"[a-z][a-z0-9\-]{2,}", text.casefold()))
+
+    bags = [words(t) for t in references + documents]
+    df = Counter(w for bag in bags for w in bag)
+    total = len(bags)
+
+    def vector(bag: Counter[str]) -> dict[str, float]:
+        weights = {w: c * math.log((1 + total) / (1 + df[w])) for w, c in bag.items()}
+        norm = math.sqrt(sum(v * v for v in weights.values())) or 1.0
+        return {w: v / norm for w, v in weights.items()}
+
+    refs = [vector(b) for b in bags[: len(references)]]
+    scores = []
+    for bag in bags[len(references) :]:
+        doc = vector(bag)
+        sims = [sum(v * ref.get(w, 0.0) for w, v in doc.items()) for ref in refs]
+        scores.append(sum(sims) / len(sims) if sims else 0.0)
+    return scores
+
+
 def relevance_backend() -> str:
     """Name the backend :func:`relevance_scores` would try first, for ``doctor``.
 
