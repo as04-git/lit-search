@@ -34,6 +34,7 @@ from lit_search.core.paper import Paper
 from lit_search.exceptions import ConnectorError, RateLimitBusyError
 from lit_search.runners.explore_runner import ExploreOutcome
 from lit_search.utils import latex_bib
+from lit_search.utils.rate_limit import request_deadline
 
 _WORKS_URL = "https://api.openalex.org/works"
 _EPRINT_URL = "https://export.arxiv.org/e-print/{arxiv_id}"
@@ -255,10 +256,11 @@ def fetch_eprint(arxiv: ArxivConnector, arxiv_id: str) -> bytes:
 
 def _resolve_entries(
     openalex: OpenAlexConnector, entries: list[latex_bib.BibEntry], deadline: float
-) -> tuple[dict[int, dict[str, Any]], int]:
+) -> tuple[dict[int, dict[str, Any]], int, str]:
     """Map entry index -> OpenAlex work; also return how many requests failed."""
     resolved: dict[int, dict[str, Any]] = {}
     failures = 0
+    last: list[Exception] = []
     wanted: dict[str, list[int]] = {}
     for index, entry in enumerate(entries):
         doi = f"10.48550/arxiv.{entry.arxiv}" if entry.arxiv else entry.doi
@@ -271,8 +273,11 @@ def _resolve_entries(
         chunk = dois[start : start + _DOI_BATCH]
         try:
             works = _works(openalex, {"filter": "doi:" + "|".join(chunk), "per-page": 200})
-        except _ERRORS:
+        except _ERRORS as exc:
             failures += 1
+            last[:] = [exc]
+            if isinstance(exc, RateLimitBusyError):
+                break
             continue
         for work in works:
             for index in wanted.get(_bare_doi(work), []):
@@ -282,20 +287,25 @@ def _resolve_entries(
         title = latex_bib.normalise(entry.title)
         if index in resolved or len(title) <= 8 or lookups >= TITLE_LOOKUPS:
             continue
-        if time.time() > deadline:
+        if time.time() > deadline or (last and isinstance(last[0], RateLimitBusyError)):
             break
         lookups += 1
         try:
             works = _works(openalex, {"filter": f"title.search:{title[:200]}", "per-page": 5})
-        except _ERRORS:
+        except _ERRORS as exc:
             failures += 1
+            last[:] = [exc]
             continue
         best = max(
             works, key=lambda w: latex_bib.title_similarity(w.get("title"), title), default=None
         )
         if best and latex_bib.title_similarity(best.get("title"), title) >= _SAME_TITLE:
             resolved[index] = best
-    return resolved, failures
+    return resolved, failures, (_why(last[0]) if last else "")
+
+
+def _why(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:160]}"
 
 
 def backward_from_source(
@@ -319,7 +329,7 @@ def backward_from_source(
     if not entries:
         detail = "the e-print is a PDF only" if kind == "pdf" else f"no bibliography ({kind})"
         return [], SourceCoverage.partial(step, 0, detail=detail)
-    resolved, failures = _resolve_entries(openalex, entries, deadline)
+    resolved, failures, why = _resolve_entries(openalex, entries, deadline)
     found: list[tuple[Paper, list[str]]] = []
     seen: set[str] = set()
     for index, work in resolved.items():
@@ -333,9 +343,11 @@ def backward_from_source(
         found.append((paper, sentences))
     detail = (
         f"{len(resolved)} of {len(entries)} {origin} entries resolved in OpenAlex"
-        + (f"; {failures} lookups failed" if failures else "")
+        + (f"; {failures} lookups failed ({why})" if failures else "")
         + (", stopped at the deadline" if time.time() > deadline else "")
     )
+    if failures and not resolved:
+        return [], SourceCoverage.failed(step, error=detail, error_type="ConnectorError")
     unresolved = len(entries) - len(resolved)
     if failures or unresolved:
         return found, SourceCoverage.partial(step, len(found), detail=detail)
@@ -381,6 +393,7 @@ def forward_from_fulltext(
         filters.append(f"to_publication_date:{until.isoformat()}")
     works: dict[str, dict[str, Any]] = {}
     failed = 0
+    why = ""
     for phrase in phrases:
         if time.time() > deadline:
             break
@@ -389,8 +402,12 @@ def forward_from_fulltext(
                 openalex,
                 {"filter": ",".join([f'fulltext.search:"{phrase}"', *filters]), "per-page": 200},
             )
-        except _ERRORS:
+        except _ERRORS as exc:
             failed += 1
+            why = _why(exc)
+            if isinstance(exc, RateLimitBusyError):
+                failed = len(phrases)
+                break
             continue
         for work in results:
             if latex_bib.title_similarity(work.get("title"), seed.title) >= _SAME_TITLE:
@@ -401,7 +418,7 @@ def forward_from_fulltext(
     papers = [p for p in (openalex._parse_paper(w) for w in works.values()) if p is not None]
     if failed == len(phrases):
         return [], SourceCoverage.failed(
-            step, error="every full-text query failed", error_type="ConnectorError"
+            step, error=f"every full-text query failed ({why})", error_type="ConnectorError"
         )
     detail = (
         f"{len(papers)} papers name the title or arXiv id in their full text (citers, "
@@ -444,6 +461,26 @@ def run_open_snowball(
         evidence = outcome.evidence.setdefault(id(kept), [])
         evidence.extend(s for s in sentences if s not in evidence)
 
+    with request_deadline(deadline):
+        _open_snowball_seeds(
+            seeds, outcome, add, openalex, arxiv, forward, backward, since, until, deadline
+        )
+    outcome.seconds = time.time() - started
+    return outcome
+
+
+def _open_snowball_seeds(
+    seeds: Sequence[OpenSeed],
+    outcome: ExploreOutcome,
+    add: Any,
+    openalex: OpenAlexConnector,
+    arxiv: ArxivConnector,
+    forward: bool,
+    backward: bool,
+    since: datetime.date | None,
+    until: datetime.date | None,
+    deadline: float,
+) -> None:
     for seed in seeds:
         if forward:
             citers, step = forward_from_fulltext(
@@ -459,8 +496,6 @@ def run_open_snowball(
             outcome.steps.append(step)
             for paper, sentences in refs:
                 add(paper, f"cited by {seed.label} [source]", sentences)
-    outcome.seconds = time.time() - started
-    return outcome
 
 
 def _search_titles(
@@ -524,6 +559,25 @@ def run_open_related(
         outcome.routes.setdefault(id(paper), []).append(route)
         return True
 
+    with request_deadline(deadline):
+        _open_related_seeds(
+            seeds, outcome, add, openalex, today, years, recent_days, count, deadline
+        )
+    outcome.seconds = time.time() - started
+    return outcome
+
+
+def _open_related_seeds(
+    seeds: Sequence[OpenSeed],
+    outcome: ExploreOutcome,
+    add: Any,
+    openalex: OpenAlexConnector,
+    today: datetime.date,
+    years: int,
+    recent_days: int,
+    count: int,
+    deadline: float,
+) -> None:
     for seed in seeds:
         for label, since, size in (
             ("similar", today - datetime.timedelta(days=365 * years), count),
@@ -584,8 +638,6 @@ def run_open_related(
             if ids or record
             else SourceCoverage.partial(step, 0, detail="seed not found in OpenAlex")
         )
-    outcome.seconds = time.time() - started
-    return outcome
 
 
 __all__ = [

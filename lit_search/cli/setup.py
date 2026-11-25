@@ -16,6 +16,7 @@ import os
 import shutil
 import stat
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ import requests
 
 from lit_search import credentials
 from lit_search.cli.output import EXIT_ERROR, EXIT_INCOMPLETE, EXIT_OK, emit_json, emit_text
+from lit_search.exceptions import RateLimitBusyError
 from lit_search.store.store import default_store_root
 
 #: Sources the instant (``find``) and ``hunt`` modes use; problems here fail ``doctor``.
@@ -221,9 +223,12 @@ def _status_of(response: requests.Response, accepted: str) -> tuple[str, str]:
 
 
 def _paced_get(service_connector: object, url: str, **kwargs: Any) -> requests.Response:
+    from lit_search.utils.rate_limit import request_deadline
+
     rate_limit = getattr(service_connector, "_rate_limit", None)
     if callable(rate_limit):
-        rate_limit()
+        with request_deadline(time.time() + _TIMEOUT):
+            rate_limit()
     return requests.get(url, timeout=_TIMEOUT, **kwargs)
 
 
@@ -243,13 +248,19 @@ def _check_semantic_scholar(key: str | None) -> tuple[str, str]:
 def _check_openalex(key: str | None) -> tuple[str, str]:
     from lit_search.connectors.openalex import OpenAlexConnector
 
-    params: dict[str, str | int] = {"per_page": 1, "search": "test"}
+    params: dict[str, str | int] = {"filter": "doi:10.48550/arxiv.1706.03762", "select": "id"}
     if key:
         params["api_key"] = key
     response = _paced_get(
         OpenAlexConnector(api_key=key), "https://api.openalex.org/works", params=params
     )
-    return _status_of(response, "key accepted" if key else "reachable without a key")
+    left = response.headers.get("x-ratelimit-remaining-usd")
+    limit = response.headers.get("x-ratelimit-limit-usd")
+    budget = f"; ${left} of ${limit} daily budget left (resets 00:00 UTC)" if left and limit else ""
+    if response.status_code == 429 and "daily_budget" in response.text:
+        return "warn", "daily budget spent: OpenAlex moves fail until 00:00 UTC" + budget
+    status, detail = _status_of(response, "key accepted" if key else "reachable without a key")
+    return status, detail + budget
 
 
 def _check_openaire(access: str | None, refresh: str | None) -> tuple[str, str]:
@@ -326,6 +337,8 @@ def _live(name: str, run: Callable[[], tuple[str, str]], fix: str) -> Check:
         status, detail = run()
     except requests.RequestException as exc:
         return Check(name, "fail", f"unreachable ({type(exc).__name__})", "check the network")
+    except RateLimitBusyError as exc:
+        return Check(name, "warn", f"not checked: {exc}", "retry later")
     return Check(name, status, detail, fix if status in ("fail", "warn") else "")
 
 
