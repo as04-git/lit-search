@@ -1,0 +1,4 @@
+{
+  "about": "Replay bench: (case, hunt) pairs whose recorded searching moves `lit-search eval bench` re-runs and grades against docs/confidence/cases.json. Add pairs from your own recorded hunts; hunt ids are local to the machine that ran them.",
+  "pairs": []
+}

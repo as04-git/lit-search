@@ -1,0 +1,90 @@
+{
+  "schema": "lit-search/confidence-set/v1",
+  "status": "Example cases on public ML papers. Replace or extend them with cases from your own searches.",
+  "rules": [
+    "Give the driver only `question` (or `paraphrase`), `profile` and the budget. Never the targets.",
+    "Run each case twice: once with `question`, once with `paraphrase` (written to avoid the targets' vocabulary).",
+    "Grade with: python tools/grade_hunt.py docs/confidence/cases.json CASE_ID HUNT_ID",
+    "Record by hand: how many shortlist entries are irrelevant."
+  ],
+  "cases": [
+    {
+      "id": "state-tracking-sign-flip",
+      "kind": "prior-art, vocabulary shift",
+      "profile": "prior-art",
+      "question": "Has anyone made linear RNNs solve parity and other state-tracking tasks by changing the range of the recurrent transition?",
+      "paraphrase": "Recurrent layers whose memory update is allowed to reverse its sign, so a fast parallel-trainable recurrence can count modulo two: has this been done?",
+      "targets": [
+        {
+          "arxiv": "2411.12537",
+          "title": "Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues"
+        },
+        {
+          "arxiv": "2502.10297",
+          "title": "DeltaProduct: Improving State-Tracking in Linear RNNs via Householder Products"
+        }
+      ]
+    },
+    {
+      "id": "grokking-orient",
+      "kind": "orient",
+      "profile": "orient",
+      "question": "What should I read to understand grokking?",
+      "paraphrase": "What should I read about networks that suddenly generalize long after they have memorised a small algorithmic training set?",
+      "targets": [
+        {
+          "arxiv": "2201.02177",
+          "title": "Grokking: Generalization Beyond Overfitting on Small Algorithmic Datasets"
+        },
+        {
+          "arxiv": "2301.05217",
+          "title": "Progress measures for grokking via mechanistic interpretability"
+        }
+      ]
+    },
+    {
+      "id": "jepa-collapse-frontier",
+      "kind": "frontier",
+      "profile": "frontier",
+      "question": "What is new on preventing representation collapse in JEPA-style world models?",
+      "paraphrase": "Recent ways to stop joint-embedding predictive models from mapping every input to nearly the same vector, without stop-gradient or EMA tricks.",
+      "since": "2025-06-01",
+      "targets": [
+        {
+          "arxiv": "2511.08544",
+          "title": "LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics"
+        },
+        {
+          "arxiv": "2603.19312",
+          "title": "LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels"
+        }
+      ]
+    },
+    {
+      "id": "illusion-known-item",
+      "kind": "known-item",
+      "profile": "known-item",
+      "question": "Find the paper arguing that state space models like Mamba are no better than transformers at tracking state, with a circuit-complexity argument.",
+      "paraphrase": "The paper saying recurrent sequence models with diagonal structure sit in the same complexity class as attention and so cannot really track state.",
+      "targets": [
+        {
+          "arxiv": "2404.08819",
+          "title": "The Illusion of State in State-Space Models"
+        }
+      ]
+    },
+    {
+      "id": "concept-probes-ambiguous",
+      "kind": "ambiguous (stopping early is wrong)",
+      "profile": "prior-art",
+      "question": "Has anyone built probes that track which concept an LLM is thinking about as it reads text, token by token?",
+      "paraphrase": "Detecting, from a language model's hidden activations, what idea it currently has in mind while processing a passage.",
+      "targets": [
+        {
+          "arxiv": "2605.28823",
+          "title": "What are They Thinking? Delineation, Probing and Tracking of Concepts in LLMs"
+        }
+      ]
+    }
+  ]
+}

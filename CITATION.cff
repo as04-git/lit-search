@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use lit-search, please cite it as below."
+title: "lit-search: literature hunts an agent can drive and a person can audit"
+repository-code: "https://github.com/as04-git/lit-search"
+type: software
+authors:
+- family-names: Shrivastava
+  given-names: Aryan
+license: MIT
+references:
+- type: software
+  title: "Findpapers: A tool for helping researchers who are looking for related works"
+  authors:
+  - family-names: Grosman
+    given-names: Jonatas
+  date-released: 2020
+  url: "https://github.com/jonatasgrosman/findpapers"
+- type: software
+  title: "paper-search-mcp"
+  authors:
+  - name: OPENAGS
+  url: "https://github.com/openags/paper-search-mcp"

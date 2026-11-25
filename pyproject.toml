@@ -1,0 +1,184 @@
+[project]
+name = "lit-search"
+version = "0.1.0"
+description = "Literature search for researchers and agents: instant search, time-budgeted hunts that combine keyword search with citation snowballing, and coverage that reports what was not reached."
+authors = [{ name = "Aryan Shrivastava", email = "aryan.shrivastava@mail.utoronto.ca" }]
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["literature search", "citation snowballing", "prior art", "agents", "academic", "arxiv", "semantic scholar", "openalex", "pubmed", "systematic review", "bibtex", "research"]
+dependencies = [
+    "lxml>=6.1.0,<7",
+    "requests>=2.32.0,<3",
+    "curl-cffi>=0.15.0",
+    "tqdm>=4.67.0,<5",
+    "defusedxml>=0.7.0,<0.8",
+    "urllib3>=2.7.0",
+    "idna>=3.15",
+    # Official OpenReview client (MIT). 2.5.1 uploaded 2026-08-24, requires_python
+    # >=3.9 (verified on PyPI 2026-08-31).  Imported lazily by
+    # lit_search/connectors/openreview.py so that its dependency tree
+    # (pycryptodome, pylatexenc, tld, editdistance) is not pulled into every
+    # process that imports the connector registry; a missing install is reported as
+    # a FAILED source naming the fix, never as an empty result.
+    "openreview-py>=2.5.1,<3",
+    # The embedded vector and full-text index (D20/D21). Not optional: the handle
+    # store, the set algebra and every coverage report work without it, but
+    # `lit-search index` and `lit-search rerank` are part of the core surface and a
+    # missing install would make them fail at import rather than at a flag.
+    #
+    # PINNED BELOW 0.38 DELIBERATELY, verified on PyPI 2026-08-31. 0.38.0 was
+    # uploaded that day at 08:46Z and publishes only macosx_11_0_arm64 and
+    # manylinux_2_28_aarch64 wheels -- there is NO x86_64 Linux wheel, where 0.37.1
+    # has one. `uv pip install lancedb==0.38.0` fails here with "no wheels with a
+    # matching platform tag". Raise the ceiling once an x86_64 wheel appears, and
+    # re-run the index tests when doing so: the FTS creation API moved once already
+    # (`create_fts_index` is deprecated as of 0.25.0 in favour of
+    # `create_index(column, config=FTS(...))`).
+    "lancedb>=0.37.1,<0.38",
+]
+
+[project.optional-dependencies]
+# Two-stage re-ranking (R6). Optional because it pulls ~3 GB of torch and
+# CUDA wheels that a plain Boolean search does not need, and because its
+# dependency tree requires Python >= 3.12 (numpy 2.5.2 declares
+# requires_python >= 3.12, verified on PyPI 2026-08-31) while the core
+# supports ^3.11. Install with: pip install 'lit-search[rerank]'.
+#
+# sentence-transformers is pinned >= 6.0.1 and the floor is not cosmetic:
+#   - 5.3.0 CANNOT LOAD Qwen/Qwen3-Reranker-0.6B at all. Its modules.json
+#     references sentence_transformers.base.modules.transformer.Transformer
+#     and sentence_transformers.cross_encoder.modules.logit_score.LogitScore,
+#     and neither module exists before ~5.4.0.
+#   - 5.x randomizes half-precision reranker rankings when the head is a
+#     sigmoid: upstream measured NanoBEIR mean NDCG@10 0.6795 (6.0.0) against
+#     0.1849 (5.7.0). Our default reranker uses an Identity head and so is
+#     unaffected, but its own model card recommends a sigmoid.
+# 6.0.1 uploaded 2026-08-31T07:50Z (verified on PyPI the same day).
+rerank = ["sentence-transformers>=6.0.1,<7", "torch>=2.2", "numpy>=2.0"]
+
+[project.scripts]
+lit-search = "lit_search.cli.main:main"
+
+[project.urls]
+"Originally based on" = "https://github.com/jonatasgrosman/findpapers"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3,<10",
+    "pytest-cov>=7.0.0,<8",
+    "pytest-randomly>=4.0.0,<5",
+    "pytest-socket>=0.7.0,<0.8",
+    "coverage[toml]>=7.13.0,<8",
+    "types-requests>=2.32.0,<3",
+    "lxml-stubs>=0.5.0,<0.6",
+    "types-tqdm>=4.67.0,<5",
+    "types-defusedxml>=0.7.0",
+    "ruff>=0.15.0,<0.16",
+    "mypy>=1.19.1,<2",
+    "xenon>=0.9.0,<0.10",
+    "pip-audit>=2.9.0,<3",
+    "bandit[toml]>=1.9.0,<2",
+    "interrogate>=1.7.0,<2",
+    "vulture>=2.14.0,<3",
+    "pygments>=2.20.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["lit_search"]
+
+[tool.pytest.ini_options]
+junit_family = "xunit2"
+minversion = "6.0"
+# --disable-socket blocks network in unit tests.  --allow-unix-socket is
+# narrower than it sounds and is required, not a relaxation: lancedb spins up
+# an asyncio event loop whose self-pipe is an AF_UNIX socketpair, so without it
+# every index test fails with SocketBlockedError before touching any code of
+# ours.  AF_INET and AF_INET6 remain blocked, which is the property the gate
+# exists for.
+addopts = "-ra -q -m 'not integration' --disable-socket --allow-unix-socket"
+testpaths = [
+    "tests"
+]
+markers = [
+    "integration: live integration/smoke tests that hit real external APIs",
+]
+
+[tool.coverage.run]
+source = ["lit_search"]
+
+[tool.coverage.report]
+fail_under = 90
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:"
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "typings.*"]
+disallow_untyped_defs = false
+
+# numpy 2.5.2 requires Python >= 3.12 and its stubs use the 3.12 `type X = ...`
+# statement, which mypy rejects under this project's python_version = "3.11".
+# Raising python_version to 3.12 would silently stop checking the core for the
+# 3.11 compatibility it claims, so the narrower fix is to not follow numpy's
+# stubs. Consequence, recorded rather than hidden: numpy is Any inside
+# lit_search/rerank/stages.py, so the vector arithmetic there is unchecked and
+# is covered by tests instead.
+# The re-ranker is the optional `rerank` extra; a base install has no stubs for it.
+[[tool.mypy.overrides]]
+module = ["sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# I = isort-compatible import sorting (replaces standalone isort).
+select = ["E", "F", "W", "I", "B", "SIM", "PT", "UP", "C4", "RUF"]
+# E501 is handled by ruff format, so we ignore it in the linter.
+# RUF001/RUF002/RUF003 (ambiguous unicode, e.g. em/en dash) are enforced: see
+# the "Coding Rules" section of CONTRIBUTING.md for the ASCII-only policy.
+# UP042 (StrEnum) is not applied: str() of a StrEnum member is its value, of a
+# str-mixin Enum member it is "Class.MEMBER", and serialised output depends on it.
+ignore = ["E501", "UP042"]
+
+[tool.ruff.format]
+# Replaces standalone black.
+quote-style = "double"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.bandit]
+# B311: random.random() used only for jitter, not for cryptographic purposes.
+skips = ["B311"]
+
+[tool.interrogate]
+ignore-init-method = true
+ignore-init-module = true
+fail-under = 95
+quiet = false
+verbose = 0
+
+[tool.vulture]
+min_confidence = 80

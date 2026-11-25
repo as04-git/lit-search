@@ -1,0 +1,46 @@
+{
+  "case_id": "synthetic-replace-me",
+  "primary_stratum": "citation_disconnected",
+  "secondary_strata": [
+    "recent_uncited"
+  ],
+  "research_question": "Which imaginary method solves a deliberately fictional problem?",
+  "initial_formulation": "Find early work on the fictional problem.",
+  "initial_query_family_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "initial_query_visible_terms": [
+    "fictional problem"
+  ],
+  "prohibited_answer_terms": [
+    "invented answer-key phrase"
+  ],
+  "critical_targets": [
+    {
+      "target_id": "synthetic-target-replace-me",
+      "acceptable_identities": [
+        {
+          "kind": "doi",
+          "value": "10.0000/not-a-real-doi"
+        }
+      ],
+      "relevance_evidence_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "freeze_timestamp": "2099-01-01T00:00:00Z",
+  "source_snapshot_digests": [
+    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  ],
+  "citation_reachability": "no_usable_path",
+  "citation_evidence_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "provider_observations": [
+    {
+      "source": "synthetic-provider",
+      "presence": "absent",
+      "coverage_status": "complete",
+      "execution_status": "complete",
+      "evidence_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ],
+  "relevance_protocol_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "max_wall_seconds": 600,
+  "max_provider_requests": 100
+}

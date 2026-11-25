@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Install (with the re-ranker extra, which part of the unit suite exercises)
+        run: uv sync --locked --extra rerank
+      - name: Lint and format
+        run: |
+          uv run ruff check lit_search tests tools
+          uv run ruff format --check lit_search tests tools
+      - name: Types
+        run: MYPYPATH=typings uv run mypy lit_search
+      - name: Unit tests (no network)
+        run: uv run pytest -q tests/unit

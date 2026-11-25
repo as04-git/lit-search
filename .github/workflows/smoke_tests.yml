@@ -1,0 +1,41 @@
+name: Live Smoke Tests
+
+# This workflow spends external API quota. It is deliberately manual,
+# single-version, and time-bounded. Compatibility CI is handled by the
+# network-blocked unit-test workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      acknowledge_live_api_use:
+        description: "I understand this run makes live external API requests"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-smoke-tests
+  cancel-in-progress: false
+
+jobs:
+  smoke-test:
+    name: Live smoke tests (Python 3.12)
+    if: ${{ inputs.acknowledge_live_api_use }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - name: Live smoke tests
+        env:
+          SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+          LIT_SEARCH_EMAIL: ${{ secrets.LIT_SEARCH_EMAIL }}
+        run: uv run pytest -v -m integration tests/integration
