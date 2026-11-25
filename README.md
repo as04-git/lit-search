@@ -18,7 +18,7 @@ $ lit-search hunt start "has anyone made linear RNNs track state by changing the
 hunt hunt-20261125-0108-31ce · profile prior-art · budget 10 min · shortlist 10 · report opens at 80%
 
 $ lit-search hunt find hunt-20261125-0108-31ce linear RNN state tracking parity --brief
-move 1 find text=linear RNN state tracking parity · 3/5 steps ok · 10.3s · +27 new, 0 again
+move 1 find text=linear RNN state tracking parity · 3/5 sources answered · 10.3s · +27 new, 0 again
   FAIL semantic_scholar: HTTPError: 429 Client Error:  for url: https://api.semanticscholar.org/graph/v1/paper/search?...
   FAIL openaire: OpenAIREAuthenticationError: OpenAIRE access-token refresh failed with HTTP 400 (HTTPError).
   c1   Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues
@@ -26,9 +26,7 @@ move 1 find text=linear RNN state tracking parity · 3/5 steps ok · 10.3s · +2
   ...
 
 $ lit-search hunt search hunt-20261125-0108-31ce 'abs[state tracking] AND abs[linear RNN]' --brief
-move 2 search query=abs[state tracking] AND abs[linear RNN] · 4/4 steps ok · 0.3s · +6 new, 9 again (c27 c16 c2 ...)
-  part semantic_scholar: Filter 'abs' is not supported by Semantic Scholar.
-  part dblp: Filter 'abs' is not supported by dblp. dblp indexes bibliographic metadata only ...
+move 2 search query=abs[state tracking] AND abs[linear RNN] · 2/2 sources answered · 0.4s · +6 new, 9 again (c27 c16 c2 ...)
 ```
 
 ## How it fits together
@@ -81,6 +79,9 @@ No key is required to start (arXiv and Hugging Face need none). A free
 [Semantic Scholar key](https://www.semanticscholar.org/product/api) makes hunts far more
 reliable. Add keys with `lit-search config set SEMANTIC_SCHOLAR_API_KEY --stdin` or
 `lit-search config import keys.env`; `lit-search config list` shows every setting.
+A [Voyage AI](https://dash.voyageai.com) key (`VOYAGE_API_KEY`; the first 200M rerank tokens
+are free) makes every hunt move list its new candidates by relevance to the question; without
+it, `tools/rerank_server.py` serves a local cross-encoder, or moves keep the hunt's own order.
 Set `LIT_SEARCH_EMAIL` so the User-Agent carries your contact address.
 
 ## Use
@@ -135,7 +136,7 @@ dropped records without a DOI. Hence:
    moves against graded cases in [`docs/confidence/cases.json`](docs/confidence/cases.json).
    One finding that shaped the tool: ordering each move's new candidates by a cross-encoder put
    target papers in an agent's first ten 81% of the time, against 43% for the default order
-   (`tools/rerank_server.py` serves it locally).
+   (Voyage's hosted reranker by default, or `tools/rerank_server.py` locally).
 
 ## More
 
